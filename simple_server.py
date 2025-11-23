@@ -14,16 +14,23 @@ import os
 import secrets
 import logging
 import threading
+import signal
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Переменные окружения
+PORT = int(os.environ.get('PORT', 8765))
+HOST = os.environ.get('HOST', '0.0.0.0')
+
 # Глобальные переменные для простоты
 clients = {}  # token -> websocket
 user_devices = {}  # username -> set of tokens
 db_path = 'clipboard_sync.db'
+server_running = True
 
 def init_database():
     """Инициализация базы данных"""
@@ -266,26 +273,40 @@ class SimpleAuthHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
 
+def signal_handler(signum, frame):
+    """Обработчик сигналов для корректного завершения"""
+    global server_running
+    logger.info(f"Получен сигнал {signum}, завершение работы...")
+    server_running = False
+
 async def main():
     """Запуск сервера"""
+    global server_running
+    
+    # Регистрация обработчиков сигналов
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     # Инициализация базы данных
     init_database()
     
-    # HTTP сервер для аутентификации
-    http_server = HTTPServer(('0.0.0.0', 8080), SimpleAuthHandler)
+    # HTTP сервер для аутентификации (используем тот же порт)
+    http_server = HTTPServer((HOST, PORT + 1), SimpleAuthHandler)
     http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
     http_thread.start()
     
-    logger.info("HTTP сервер запущен на порту 8080 (для аутентификации)")
-    logger.info("WebSocket сервер запускается на порту 8765 (для синхронизации)")
+    logger.info(f"HTTP сервер запущен на {HOST}:{PORT + 1} (для аутентификации)")
+    logger.info(f"WebSocket сервер запускается на {HOST}:{PORT} (для синхронизации)")
     
     # WebSocket сервер для синхронизации
-    async with websockets.serve(handle_websocket_connection, '0.0.0.0', 8765):
-        logger.info("Сервер синхронизации буфера обмена запущен!")
+    async with websockets.serve(handle_websocket_connection, HOST, PORT):
+        logger.info(f"Сервер синхронизации буфера обмена запущен на {HOST}:{PORT}!")
         logger.info("Используйте Ctrl+C для остановки")
         
         try:
-            await asyncio.Future()  # Запуск навсегда
+            # Ждем сигнала завершения
+            while server_running:
+                await asyncio.sleep(1)
         except KeyboardInterrupt:
             logger.info("Остановка сервера...")
 
