@@ -134,39 +134,6 @@ def authenticate_user_sync(username: str, password: str, device_id: str = "", de
     except Exception as e:
         logger.error(f"Ошибка аутентификации пользователя {username}: {e}")
         return {'success': False, 'error': 'Ошибка сервера'}
-    """Регистрация нового пользователя"""
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
-        if cursor.fetchone():
-            conn.close()
-            return {'success': False, 'error': 'Пользователь уже существует'}
-        
-        password_hash = hash_password(password)
-        cursor.execute("INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)",
-                     (username, password_hash, email))
-        
-        token = generate_token()
-        cursor.execute("INSERT INTO sessions (token, username, device_id, device_name) VALUES (?, ?, ?, ?)",
-                     (token, username, device_id, device_name))
-        
-        conn.commit()
-        conn.close()
-        
-        if username not in user_devices:
-            user_devices[username] = set()
-        user_devices[username].add(token)
-        
-        logger.info(f"Зарегистрирован новый пользователь: {username}")
-        return {'success': True, 'token': token}
-        
-    except Exception as e:
-        logger.error(f"Ошибка регистрации пользователя {username}: {e}")
-        return {'success': False, 'error': 'Ошибка сервера'}
-
-async def authenticate_user(username: str, password: str, device_id: str = "", device_name: str = "") -> dict:
     """Аутентификация пользователя"""
     try:
         conn = sqlite3.connect(db_path)
@@ -323,11 +290,21 @@ class SimpleAuthHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Обработка POST запросов"""
         try:
-            content_length = int(self.headers['Content-Length'])
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                logger.warning("Получен POST запрос без данных")
+                self.send_response(400)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Нет данных'}).encode())
+                return
+                
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data.decode('utf-8'))
             
             path = self.path
+            logger.info(f"Получен {path} запрос: {data.get('username', 'неизвестно')}")
             
             if path == '/register':
                 result = register_user_sync(
@@ -347,18 +324,28 @@ class SimpleAuthHandler(BaseHTTPRequestHandler):
             else:
                 result = {'success': False, 'error': 'Неизвестный путь'}
             
+            logger.info(f"Результат {path}: {result.get('success', False)}")
+            
             self.send_response(200)
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
             
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON: {e}")
+            self.send_response(400)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': False, 'error': 'Неверный JSON'}).encode())
         except Exception as e:
+            logger.error(f"Ошибка обработки POST запроса: {e}")
             self.send_response(500)
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.wfile.write(json.dumps({'success': False, 'error': f'Ошибка сервера: {str(e)}'}).encode())
 
 def signal_handler(signum, frame):
     """Обработчик сигналов для корректного завершения"""
