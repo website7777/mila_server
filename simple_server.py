@@ -290,25 +290,36 @@ async def main():
     # Инициализация базы данных
     init_database()
     
-    # HTTP сервер для аутентификации (используем тот же порт)
-    http_server = HTTPServer((HOST, PORT + 1), SimpleAuthHandler)
-    http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
-    http_thread.start()
-    
-    logger.info(f"HTTP сервер запущен на {HOST}:{PORT + 1} (для аутентификации)")
-    logger.info(f"WebSocket сервер запускается на {HOST}:{PORT} (для синхронизации)")
-    
-    # WebSocket сервер для синхронизации
-    async with websockets.serve(handle_websocket_connection, HOST, PORT):
-        logger.info(f"Сервер синхронизации буфера обмена запущен на {HOST}:{PORT}!")
-        logger.info("Используйте Ctrl+C для остановки")
+    # В облачной среде запускаем только HTTP сервер на основном порту
+    if 'PORT' in os.environ:
+        # Облачная среда - только HTTP API
+        logger.info(f"Запуск в облачной среде на порту {PORT}")
+        http_server = HTTPServer((HOST, PORT), SimpleAuthHandler)
+        logger.info(f"HTTP API сервер запущен на {HOST}:{PORT}")
+        http_server.serve_forever()
+    else:
+        # Локальная среда - HTTP + WebSocket на разных портах
+        logger.info("Запуск в локальной среде")
         
-        try:
-            # Ждем сигнала завершения
-            while server_running:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Остановка сервера...")
+        # HTTP сервер для аутентификации
+        http_server = HTTPServer((HOST, PORT + 1), SimpleAuthHandler)
+        http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        http_thread.start()
+        
+        logger.info(f"HTTP сервер запущен на {HOST}:{PORT + 1} (для аутентификации)")
+        logger.info(f"WebSocket сервер запускается на {HOST}:{PORT} (для синхронизации)")
+        
+        # WebSocket сервер для синхронизации
+        async with websockets.serve(handle_websocket_connection, HOST, PORT):
+            logger.info(f"Сервер синхронизации буфера обмена запущен на {HOST}:{PORT}!")
+            logger.info("Используйте Ctrl+C для остановки")
+            
+            try:
+                # Ждем сигнала завершения
+                while server_running:
+                    await asyncio.sleep(1)
+            except KeyboardInterrupt:
+                logger.info("Остановка сервера...")
 
 if __name__ == '__main__':
     try:
