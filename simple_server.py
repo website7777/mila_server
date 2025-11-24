@@ -70,7 +70,70 @@ def generate_token() -> str:
     """Генерация токена сессии"""
     return secrets.token_urlsafe(32)
 
-async def register_user(username: str, password: str, email: str = "", device_id: str = "", device_name: str = "") -> dict:
+def register_user_sync(username: str, password: str, email: str = "", device_id: str = "", device_name: str = "") -> dict:
+    """Синхронная версия регистрации пользователя"""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
+        if cursor.fetchone():
+            conn.close()
+            return {'success': False, 'error': 'Пользователь уже существует'}
+        
+        password_hash = hash_password(password)
+        cursor.execute("INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)",
+                     (username, password_hash, email))
+        
+        token = generate_token()
+        cursor.execute("INSERT INTO sessions (token, username, device_id, device_name) VALUES (?, ?, ?, ?)",
+                     (token, username, device_id, device_name))
+        
+        conn.commit()
+        conn.close()
+        
+        if username not in user_devices:
+            user_devices[username] = set()
+        user_devices[username].add(token)
+        
+        logger.info(f"Зарегистрирован новый пользователь: {username}")
+        return {'success': True, 'token': token}
+        
+    except Exception as e:
+        logger.error(f"Ошибка регистрации пользователя {username}: {e}")
+        return {'success': False, 'error': 'Ошибка сервера'}
+
+def authenticate_user_sync(username: str, password: str, device_id: str = "", device_name: str = "") -> dict:
+    """Синхронная версия аутентификации пользователя"""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        password_hash = hash_password(password)
+        cursor.execute("SELECT username FROM users WHERE username = ? AND password_hash = ?",
+                     (username, password_hash))
+        
+        if not cursor.fetchone():
+            conn.close()
+            return {'success': False, 'error': 'Неверное имя пользователя или пароль'}
+        
+        token = generate_token()
+        cursor.execute("INSERT INTO sessions (token, username, device_id, device_name) VALUES (?, ?, ?, ?)",
+                     (token, username, device_id, device_name))
+        
+        conn.commit()
+        conn.close()
+        
+        if username not in user_devices:
+            user_devices[username] = set()
+        user_devices[username].add(token)
+        
+        logger.info(f"Авторизован пользователь: {username}")
+        return {'success': True, 'token': token}
+        
+    except Exception as e:
+        logger.error(f"Ошибка аутентификации пользователя {username}: {e}")
+        return {'success': False, 'error': 'Ошибка сервера'}
     """Регистрация нового пользователя"""
     try:
         conn = sqlite3.connect(db_path)
@@ -233,6 +296,30 @@ class SimpleAuthHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
     
+    def do_GET(self):
+        """Обработка GET запросов"""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+        
+        html_content = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Clipboard Sync Server</title>
+            <meta charset="utf-8">
+        </head>
+        <body>
+            <h1>🔗 Clipboard Sync Server</h1>
+            <p>✅ Server is running and ready for connections!</p>
+            <p>📋 This is the authentication API for clipboard synchronization.</p>
+            <p>🚀 Use your desktop client to connect.</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html_content.encode('utf-8'))
+    
     def do_POST(self):
         """Обработка POST запросов"""
         try:
@@ -243,20 +330,20 @@ class SimpleAuthHandler(BaseHTTPRequestHandler):
             path = self.path
             
             if path == '/register':
-                result = asyncio.run(register_user(
+                result = register_user_sync(
                     data.get('username', ''),
                     data.get('password', ''),
                     data.get('email', ''),
                     data.get('device_id', ''),
                     data.get('device_name', '')
-                ))
+                )
             elif path == '/auth':
-                result = asyncio.run(authenticate_user(
+                result = authenticate_user_sync(
                     data.get('username', ''),
                     data.get('password', ''),
                     data.get('device_id', ''),
                     data.get('device_name', '')
-                ))
+                )
             else:
                 result = {'success': False, 'error': 'Неизвестный путь'}
             
