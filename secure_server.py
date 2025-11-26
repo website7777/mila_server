@@ -113,13 +113,24 @@ def generate_salt() -> str:
 
 def hash_password(password: str, salt: str) -> str:
     """Безопасное хеширование пароля с солью"""
-    return bcrypt.hashpw((password + salt).encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    # Обрезаем пароль до 72 байт для совместимости с bcrypt
+    password_combined = (password + salt)
+    password_bytes = password_combined.encode('utf-8')
+    if len(password_bytes) > 72:
+        password_bytes = password_bytes[:72]
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
 
 def verify_password(password: str, salt: str, hash_: str) -> bool:
     """Проверка пароля"""
     try:
-        return bcrypt.checkpw((password + salt).encode('utf-8'), hash_.encode('utf-8'))
-    except:
+        # Обрезаем пароль до 72 байт для совместимости с bcrypt  
+        password_combined = (password + salt)
+        password_bytes = password_combined.encode('utf-8')
+        if len(password_bytes) > 72:
+            password_bytes = password_bytes[:72]
+        return bcrypt.checkpw(password_bytes, hash_.encode('utf-8'))
+    except Exception as e:
+        logger.error(f"Password verification error: {e}")
         return False
 
 def generate_secure_token() -> str:
@@ -180,6 +191,9 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         
         if not password or len(password) < 6:
             return {'success': False, 'error': 'Пароль должен быть не менее 6 символов'}
+            
+        if len(password) > 50:  # Ограничиваем длину пароля
+            return {'success': False, 'error': 'Пароль слишком длинный. Максимум 50 символов.'}
         
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -228,7 +242,14 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         
     except Exception as e:
         logger.error(f"Registration error for {username}: {e}")
-        return {'success': False, 'error': 'Ошибка сервера'}
+        # Более детальная обработка ошибок
+        error_message = str(e)
+        if "password cannot be longer than 72 bytes" in error_message:
+            return {'success': False, 'error': 'Пароль слишком длинный. Максимум 50 символов.'}
+        elif "UNIQUE constraint failed" in error_message:
+            return {'success': False, 'error': 'Пользователь с таким именем уже существует'}
+        else:
+            return {'success': False, 'error': f'Ошибка регистрации: {error_message}'}
 
 def authenticate_user_secure(username: str, password: str, device_id: str = "", device_name: str = "", ip_address: str = None) -> dict:
     """Безопасная аутентификация пользователя"""
@@ -260,20 +281,26 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
             return {'success': False, 'error': 'Аккаунт деактивирован'}
         
         # Проверка блокировки аккаунта
-        if locked_until and datetime.fromisoformat(locked_until) > datetime.now():
-            conn.close()
-            return {'success': False, 'error': 'Аккаунт временно заблокирован'}
+        if locked_until:
+            try:
+                locked_datetime = datetime.fromisoformat(locked_until)
+                if locked_datetime > datetime.now():
+                    conn.close()
+                    return {'success': False, 'error': 'Аккаунт временно заблокирован'}
+            except:
+                pass  # Игнорируем ошибки парсинга даты
         
         # Проверка пароля
         if not verify_password(password, salt, password_hash):
             # Увеличение счетчика неудачных попыток
+            new_attempts = (login_attempts_db or 0) + 1
             cursor.execute('''
-                UPDATE users SET login_attempts = login_attempts + 1
+                UPDATE users SET login_attempts = ?
                 WHERE id = ?
-            ''', (user_id,))
+            ''', (new_attempts, user_id))
             
             # Блокировка после 5 неудачных попыток
-            if login_attempts_db + 1 >= 5:
+            if new_attempts >= 5:
                 locked_until = datetime.now() + timedelta(minutes=30)
                 cursor.execute('''
                     UPDATE users SET locked_until = ?
@@ -319,7 +346,12 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         
     except Exception as e:
         logger.error(f"Authentication error for {username}: {e}")
-        return {'success': False, 'error': 'Ошибка сервера'}
+        # Более детальная обработка ошибок
+        error_message = str(e)
+        if "password cannot be longer than 72 bytes" in error_message:
+            return {'success': False, 'error': 'Пароль слишком длинный'}
+        else:
+            return {'success': False, 'error': f'Ошибка аутентификации: {error_message}'}
 
 def get_user_by_token(token: str) -> dict:
     """Получение пользователя по токену с проверкой истечения"""
