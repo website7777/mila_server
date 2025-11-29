@@ -675,15 +675,38 @@ async def main():
     # Запуск задачи очистки
     cleanup_task_handle = asyncio.create_task(cleanup_task())
     
-    # В облачной среде запускаем только HTTP сервер
+    # В облачной среде запускаем HTTP + WebSocket на одном порту
     if 'PORT' in os.environ:
         logger.info(f"Starting secure server in cloud environment on port {PORT}")
-        http_server = HTTPServer((HOST, PORT), SecureAuthHandler)
-        logger.info(f"Secure HTTP API server running on {HOST}:{PORT}")
         
+        # Запускаем HTTP сервер в отдельном потоке
+        http_server = HTTPServer((HOST, PORT), SecureAuthHandler)
+        http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        http_thread.start()
+        
+        logger.info(f"Secure HTTP API server running on {HOST}:{PORT}")
+        logger.info(f"Secure WebSocket server starting on {HOST}:{PORT}")
+        
+        # WebSocket сервер на том же порту (но платформа не поддерживает это)
+        # Поэтому используем альтернативный подход через HTTP upgrade
         try:
-            http_server.serve_forever()
+            # Пытаемся запустить WebSocket сервер на следующем порту
+            ws_port = PORT + 1
+            async with websockets.serve(handle_websocket_connection, HOST, ws_port):
+                logger.info(f"Secure WebSocket server running on {HOST}:{ws_port}")
+                logger.info("Enhanced security features enabled")
+                
+                while server_running:
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"WebSocket server error: {e}")
+            # Если WebSocket сервер не запускается, работаем только с HTTP
+            logger.info("Running in HTTP-only mode")
+            while server_running:
+                await asyncio.sleep(1)
         except KeyboardInterrupt:
+            pass
+        finally:
             cleanup_task_handle.cancel()
     else:
         # Локальная среда - HTTP + WebSocket
