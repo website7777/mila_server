@@ -111,9 +111,9 @@ def generate_salt() -> str:
 
 def hash_password(password: str, salt: str) -> str:
     """Безопасное хеширование пароля с солью"""
+    # bcrypt уже включает соль, поэтому используем простое хеширование
     # Обрезаем пароль до 72 байт для совместимости с bcrypt
-    password_combined = (password + salt)
-    password_bytes = password_combined.encode('utf-8')
+    password_bytes = password.encode('utf-8')
     if len(password_bytes) > 72:
         password_bytes = password_bytes[:72]
     return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
@@ -121,9 +121,8 @@ def hash_password(password: str, salt: str) -> str:
 def verify_password(password: str, salt: str, hash_: str) -> bool:
     """Проверка пароля"""
     try:
-        # Обрезаем пароль до 72 байт для совместимости с bcrypt  
-        password_combined = (password + salt)
-        password_bytes = password_combined.encode('utf-8')
+        # bcrypt уже включает соль в хеш, поэтому используем простую проверку  
+        password_bytes = password.encode('utf-8')
         if len(password_bytes) > 72:
             password_bytes = password_bytes[:72]
         return bcrypt.checkpw(password_bytes, hash_.encode('utf-8'))
@@ -297,9 +296,14 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
                 pass  # Игнорируем ошибки парсинга даты
         
         # Проверка пароля
-        if not verify_password(password, salt, password_hash):
+        logger.info(f"Verifying password for user {username}")
+        password_valid = verify_password(password, salt, password_hash)
+        logger.info(f"Password verification result for {username}: {password_valid}")
+        
+        if not password_valid:
             # Увеличение счетчика неудачных попыток
             new_attempts = (login_attempts_db or 0) + 1
+            logger.warning(f"Failed login attempt #{new_attempts} for user {username}")
             cursor.execute('''
                 UPDATE users SET login_attempts = ?
                 WHERE id = ?
@@ -362,34 +366,45 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
 def get_user_by_token(token: str) -> dict:
     """Получение пользователя по токену с проверкой истечения"""
     try:
+        logger.info(f"Validating token: {token[:10]}...{token[-10:] if len(token) > 20 else token}")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT u.id, u.username, s.expires_at
+            SELECT u.id, u.username, s.expires_at, s.is_active
             FROM users u
             JOIN user_sessions s ON u.id = s.user_id
-            WHERE s.token = ? AND s.is_active = 1
+            WHERE s.token = ?
         ''', (token,))
         
         result = cursor.fetchone()
-        conn.close()
         
         if not result:
+            logger.warning(f"Token not found in database: {token[:10]}...")
+            conn.close()
             return None
             
-        user_id, username, expires_at = result
+        user_id, username, expires_at, is_active = result
+        logger.info(f"Found token for user {username}, active: {is_active}, expires: {expires_at}")
+        
+        if not is_active:
+            logger.warning(f"Token is inactive for user {username}")
+            conn.close()
+            return None
         
         # Проверка истечения токена
-        if datetime.fromisoformat(expires_at) <= datetime.now():
+        expires_dt = datetime.fromisoformat(expires_at)
+        now = datetime.now()
+        if expires_dt <= now:
+            logger.warning(f"Token expired for user {username}: {expires_dt} <= {now}")
             # Деактивируем истёкший токен
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
             cursor.execute('UPDATE user_sessions SET is_active = 0 WHERE token = ?', (token,))
             conn.commit()
             conn.close()
             return None
         
+        logger.info(f"Token valid for user {username}")
+        conn.close()
         return {'user_id': user_id, 'username': username}
         
     except Exception as e:
@@ -474,19 +489,22 @@ class SecureHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
     
     def do_GET(self):
-        """Обработка GET запросов"""
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        
+        """Обработка GET запросов"""        
         if self.path == '/':
-            response = {'status': 'ok', 'service': 'secure-clipboard-sync', 'version': '2.0'}
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            response = {'status': 'ok', 'service': 'secure-clipboard-sync', 'version': '2.1'}
             self.wfile.write(json.dumps(response).encode())
         elif self.path.startswith('/sync'):
             # Получение данных буфера обмена (polling)
             self.handle_sync_request()
         else:
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
             self.wfile.write(json.dumps({'error': 'Not found'}).encode())
     
     def do_POST(self):
@@ -541,11 +559,15 @@ class SecureHTTPHandler(BaseHTTPRequestHandler):
         content = data.get('content', '')
         device_id = data.get('device_id', '')
         
+        logger.info(f"Push request from {client_ip} with token {token[:10]}...")
+        
         user_data = get_user_by_token(token)
         if not user_data:
+            logger.warning(f"Push failed - invalid token from {client_ip}")
             self.send_error_response({'error': 'Invalid or expired token'})
             return
         
+        logger.info(f"Push from user {user_data['username']}")
         store_clipboard_data(user_data['user_id'], content, device_id)
         log_activity(user_data['user_id'], "CLIPBOARD_PUSH", client_ip)
         
