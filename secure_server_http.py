@@ -393,9 +393,16 @@ def get_user_by_token(token: str) -> dict:
             return None
         
         # Проверка истечения токена
-        expires_dt = datetime.fromisoformat(expires_at)
+        try:
+            expires_dt = datetime.fromisoformat(expires_at)
+        except Exception as parse_err:
+            # Если дата в неожиданном формате, не отбрасываем токен вслепую
+            logger.error(f"Failed to parse expires_at for token {token[:10]}...: {parse_err}; raw={expires_at}")
+            expires_dt = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
+
         now = datetime.now()
-        if expires_dt <= now:
+        # Разрешаем небольшой дрейф часов (±5 минут) чтобы не инвалидировать токены из‑за рассинхронизации
+        if expires_dt + timedelta(minutes=5) <= now:
             logger.warning(f"Token expired for user {username}: {expires_dt} <= {now}")
             # Деактивируем истёкший токен
             cursor.execute('UPDATE user_sessions SET is_active = 0 WHERE token = ?', (token,))
