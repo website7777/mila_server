@@ -73,6 +73,14 @@ def init_database():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
+
+    # Миграция: приводим старые записи к is_active=1, если поле было NULL
+    cursor.execute('''
+        UPDATE user_sessions
+        SET is_active = 1
+        WHERE is_active IS NULL
+    ''')
+    conn.commit()
     
     # Логи активности
     cursor.execute('''
@@ -366,6 +374,7 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
 def get_user_by_token(token: str) -> dict:
     """Получение пользователя по токену с проверкой истечения"""
     try:
+        token = (token or '').strip()
         logger.info(f"Validating token: {token[:10]}...{token[-10:] if len(token) > 20 else token}")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -374,7 +383,7 @@ def get_user_by_token(token: str) -> dict:
             SELECT u.id, u.username, s.expires_at, s.is_active
             FROM users u
             JOIN user_sessions s ON u.id = s.user_id
-            WHERE s.token = ?
+            WHERE s.token = ? AND (s.is_active = 1 OR s.is_active IS NULL)
         ''', (token,))
         
         result = cursor.fetchone()
