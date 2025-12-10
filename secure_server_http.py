@@ -233,13 +233,18 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         token = generate_secure_token()
         expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
         
+        logger.info(f"[REGISTER] Creating initial session for new user {username}")
+        logger.info(f"[REGISTER] Token: {token[:10]}..., Expires: {expires_at}")
+        
         cursor.execute('''
-            INSERT INTO user_sessions (user_id, token, ip_address, expires_at)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, token, ip_address, expires_at))
+            INSERT INTO user_sessions (user_id, token, ip_address, expires_at, is_active)
+            VALUES (?, ?, ?, ?, 1)
+        ''', (user_id, token, ip_address, expires_at.isoformat()))
         
         conn.commit()
         conn.close()
+        
+        logger.info(f"[REGISTER] Initial session created for {username}")
         
         # Логирование
         log_activity(user_id, "USER_REGISTERED", ip_address)
@@ -342,13 +347,18 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         token = generate_secure_token()
         expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
         
+        logger.info(f"[AUTH] Creating new session for user {username}")
+        logger.info(f"[AUTH] Token: {token[:10]}..., Expires: {expires_at}")
+        
         cursor.execute('''
-            INSERT INTO user_sessions (user_id, token, device_id, device_name, ip_address, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, token, device_id, device_name, ip_address, expires_at))
+            INSERT INTO user_sessions (user_id, token, device_id, device_name, ip_address, expires_at, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+        ''', (user_id, token, device_id, device_name, ip_address, expires_at.isoformat()))
         
         conn.commit()
         conn.close()
+        
+        logger.info(f"[AUTH] Session created successfully for {username}")
         
         # Логирование
         log_activity(user_id, "LOGIN_SUCCESS", ip_address, details=f"Device: {device_name}")
@@ -375,56 +385,69 @@ def get_user_by_token(token: str) -> dict:
     """Получение пользователя по токену с проверкой истечения"""
     try:
         token = (token or '').strip()
-        logger.info(f"Validating token: {token[:10]}...{token[-10:] if len(token) > 20 else token}")
+        if not token:
+            logger.warning(f"Empty token provided")
+            return None
+            
+        logger.info(f"=== TOKEN VALIDATION START: {token[:10]}...{token[-10:] if len(token) > 20 else token} ===")
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
+        # STEP 1: Ищем токен БЕЗ фильтров, чтобы увидеть что есть
         cursor.execute('''
-            SELECT u.id, u.username, s.expires_at, s.is_active
-            FROM users u
-            JOIN user_sessions s ON u.id = s.user_id
-            WHERE s.token = ? AND (s.is_active = 1 OR s.is_active IS NULL)
+            SELECT s.id, s.user_id, s.token, s.is_active, s.expires_at, u.username
+            FROM user_sessions s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.token = ?
         ''', (token,))
         
-        result = cursor.fetchone()
+        raw_result = cursor.fetchone()
         
-        if not result:
-            logger.warning(f"Token not found in database: {token[:10]}...")
-            conn.close()
-            return None
-            
-        user_id, username, expires_at, is_active = result
-        logger.info(f"Found token for user {username}, active: {is_active}, expires: {expires_at}")
-        
-        if not is_active:
-            logger.warning(f"Token is inactive for user {username}")
+        if not raw_result:
+            logger.warning(f"[REJECT] Token not found in database at all")
             conn.close()
             return None
         
-        # Проверка истечения токена
+        session_id, user_id, found_token, is_active, expires_at, username = raw_result
+        logger.info(f"[FOUND] Session ID={session_id}, User={username}, is_active={is_active}, expires_at={expires_at}")
+        
+        # STEP 2: Проверяем is_active (может быть NULL, 0 или 1)
+        if is_active == 0:
+            logger.warning(f"[REJECT] Token explicitly marked as inactive (is_active=0)")
+            conn.close()
+            return None
+        
+        logger.info(f"[PASS] is_active check passed (value={is_active})")
+        
+        # STEP 3: Проверяем срок действия
         try:
             expires_dt = datetime.fromisoformat(expires_at)
+            logger.info(f"[PARSE] expires_at parsed successfully: {expires_dt}")
         except Exception as parse_err:
-            # Если дата в неожиданном формате, не отбрасываем токен вслепую
-            logger.error(f"Failed to parse expires_at for token {token[:10]}...: {parse_err}; raw={expires_at}")
+            logger.error(f"[ERROR] Failed to parse expires_at: {parse_err}; raw={expires_at}")
+            # Даем токену еще 24 часа, если не можем распарсить дату
             expires_dt = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
+            logger.info(f"[FALLBACK] Using fallback expires_dt: {expires_dt}")
 
         now = datetime.now()
-        # Разрешаем небольшой дрейф часов (±5 минут) чтобы не инвалидировать токены из‑за рассинхронизации
+        time_diff = (expires_dt - now).total_seconds()
+        logger.info(f"[TIME] Now={now}, Expires={expires_dt}, Diff={time_diff}s")
+        
+        # Разрешаем дрейф часов ±5 минут
         if expires_dt + timedelta(minutes=5) <= now:
-            logger.warning(f"Token expired for user {username}: {expires_dt} <= {now}")
-            # Деактивируем истёкший токен
-            cursor.execute('UPDATE user_sessions SET is_active = 0 WHERE token = ?', (token,))
+            logger.warning(f"[REJECT] Token expired: {expires_dt} + 5min <= {now}")
+            cursor.execute('UPDATE user_sessions SET is_active = 0 WHERE id = ?', (session_id,))
             conn.commit()
             conn.close()
             return None
         
-        logger.info(f"Token valid for user {username}")
+        logger.info(f"[PASS] Expiry check passed")
+        logger.info(f"=== TOKEN VALIDATION SUCCESS for user {username} ===")
         conn.close()
         return {'user_id': user_id, 'username': username}
         
     except Exception as e:
-        logger.error(f"Token validation error: {e}")
+        logger.error(f"[ERROR] Token validation error: {e}", exc_info=True)
         return None
 
 def store_clipboard_data(user_id: int, content: str, device_id: str = ""):
@@ -599,11 +622,15 @@ class SecureHTTPHandler(BaseHTTPRequestHandler):
         token = params.get('token', [''])[0]
         since = params.get('since', [None])[0]
         
+        logger.info(f"[SYNC] Received sync request with token {token[:10]}...")
+        
         user_data = get_user_by_token(token)
         if not user_data:
+            logger.error(f"[SYNC] Token validation failed, returning 400")
             self.send_error_response({'error': 'Invalid or expired token'})
             return
         
+        logger.info(f"[SYNC] Token valid for user {user_data['username']}, retrieving clipboard")
         result = get_clipboard_data(user_data['user_id'], since)
         self.send_json_response(result)
     
