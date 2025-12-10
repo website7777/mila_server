@@ -228,23 +228,38 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         ''', (username, email, password_hash, salt))
         
         user_id = cursor.lastrowid
+        logger.info(f"[REGISTER] User created with ID={user_id}")
         
         # Создание первой сессии
         token = generate_secure_token()
         expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
+        expires_at_str = expires_at.isoformat()
         
         logger.info(f"[REGISTER] Creating initial session for new user {username}")
-        logger.info(f"[REGISTER] Token: {token[:10]}..., Expires: {expires_at}")
+        logger.info(f"[REGISTER] Token: {token[:10]}..., Expires: {expires_at_str}")
         
         cursor.execute('''
             INSERT INTO user_sessions (user_id, token, ip_address, expires_at, is_active)
             VALUES (?, ?, ?, ?, 1)
-        ''', (user_id, token, ip_address, expires_at.isoformat()))
+        ''', (user_id, token, ip_address, expires_at_str))
+        
+        session_id = cursor.lastrowid
+        logger.info(f"[REGISTER] Session inserted with ID={session_id}")
+        
+        # Явная проверка что сессия записалась
+        cursor.execute('''
+            SELECT id, token, is_active, expires_at FROM user_sessions WHERE id = ?
+        ''', (session_id,))
+        verify_row = cursor.fetchone()
+        if verify_row:
+            logger.info(f"[REGISTER] VERIFIED: Session {verify_row[0]} exists, token={verify_row[1][:10]}..., is_active={verify_row[2]}, expires={verify_row[3]}")
+        else:
+            logger.error(f"[REGISTER] ERROR: Session {session_id} was NOT found after INSERT!")
         
         conn.commit()
         conn.close()
         
-        logger.info(f"[REGISTER] Initial session created for {username}")
+        logger.info(f"[REGISTER] Initial session created and committed for {username}")
         
         # Логирование
         log_activity(user_id, "USER_REGISTERED", ip_address)
@@ -346,19 +361,33 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         # Создание новой сессии
         token = generate_secure_token()
         expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
+        expires_at_str = expires_at.isoformat()
         
         logger.info(f"[AUTH] Creating new session for user {username}")
-        logger.info(f"[AUTH] Token: {token[:10]}..., Expires: {expires_at}")
+        logger.info(f"[AUTH] Token: {token[:10]}..., Expires: {expires_at_str}")
         
         cursor.execute('''
             INSERT INTO user_sessions (user_id, token, device_id, device_name, ip_address, expires_at, is_active)
             VALUES (?, ?, ?, ?, ?, ?, 1)
-        ''', (user_id, token, device_id, device_name, ip_address, expires_at.isoformat()))
+        ''', (user_id, token, device_id, device_name, ip_address, expires_at_str))
+        
+        session_id = cursor.lastrowid
+        logger.info(f"[AUTH] Session inserted with ID={session_id}")
+        
+        # Явная проверка что сессия записалась
+        cursor.execute('''
+            SELECT id, token, is_active, expires_at FROM user_sessions WHERE id = ?
+        ''', (session_id,))
+        verify_row = cursor.fetchone()
+        if verify_row:
+            logger.info(f"[AUTH] VERIFIED: Session {verify_row[0]} exists, token={verify_row[1][:10]}..., is_active={verify_row[2]}, expires={verify_row[3]}")
+        else:
+            logger.error(f"[AUTH] ERROR: Session {session_id} was NOT found after INSERT!")
         
         conn.commit()
         conn.close()
         
-        logger.info(f"[AUTH] Session created successfully for {username}")
+        logger.info(f"[AUTH] Session created and committed successfully for {username}")
         
         # Логирование
         log_activity(user_id, "LOGIN_SUCCESS", ip_address, details=f"Device: {device_name}")
