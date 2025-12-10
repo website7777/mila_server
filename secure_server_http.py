@@ -39,7 +39,10 @@ server_running = True
 
 def init_database():
     """Инициализация безопасной базы данных"""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=FULL')
+    conn.execute('PRAGMA temp_store=MEMORY')
     cursor = conn.cursor()
     
     # Пользователи с улучшенной безопасностью
@@ -178,7 +181,10 @@ def record_login_attempt(ip_address: str, success: bool):
 def log_activity(user_id: int, action: str, ip_address: str = None, details: str = None):
     """Логирование активности пользователя"""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -193,35 +199,49 @@ def log_activity(user_id: int, action: str, ip_address: str = None, details: str
 
 def register_user_secure(username: str, password: str, email: str = "", ip_address: str = None) -> dict:
     """Безопасная регистрация пользователя"""
+    logger.info(f"[REGISTER] === STARTING REGISTRATION for {username} ===")
     try:
         # Проверка блокировки IP
         if is_ip_blocked(ip_address):
+            logger.warning(f"[REGISTER] IP {ip_address} is blocked")
             return {'success': False, 'error': 'IP временно заблокирован из-за множественных неудачных попыток'}
         
         # Валидация данных
         if not username or len(username) < 3:
+            logger.warning(f"[REGISTER] Invalid username length: {len(username) if username else 0}")
             return {'success': False, 'error': 'Имя пользователя должно быть не менее 3 символов'}
         
         if not password or len(password) < 6:
+            logger.warning(f"[REGISTER] Invalid password length: {len(password) if password else 0}")
             return {'success': False, 'error': 'Пароль должен быть не менее 6 символов'}
             
         if len(password) > 50:  # Ограничиваем длину пароля
+            logger.warning(f"[REGISTER] Password too long: {len(password)}")
             return {'success': False, 'error': 'Пароль слишком длинный. Максимум 50 символов.'}
         
-        conn = sqlite3.connect(db_path)
+        logger.info(f"[REGISTER] Opening database connection...")
+        conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         cursor = conn.cursor()
+        logger.info(f"[REGISTER] Database connected")
         
         # Проверка существования пользователя
+        logger.info(f"[REGISTER] Checking if user already exists...")
         cursor.execute("SELECT id FROM users WHERE username = ? OR email = ?", (username, email))
         if cursor.fetchone():
+            logger.warning(f"[REGISTER] User already exists: {username}")
             conn.close()
             record_login_attempt(ip_address, False)
             return {'success': False, 'error': 'Пользователь с таким именем или email уже существует'}
         
+        logger.info(f"[REGISTER] User does not exist, creating new user")
         # Создание пользователя
         salt = generate_salt()
         password_hash = hash_password(password, salt)
         
+        logger.info(f"[REGISTER] Inserting user into database...")
         cursor.execute('''
             INSERT INTO users (username, email, password_hash, salt)
             VALUES (?, ?, ?, ?)
@@ -231,6 +251,7 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         logger.info(f"[REGISTER] User created with ID={user_id}")
         
         # Создание первой сессии
+        logger.info(f"[REGISTER] Creating initial session...")
         token = generate_secure_token()
         expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
         expires_at_str = expires_at.isoformat()
@@ -238,6 +259,7 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         logger.info(f"[REGISTER] Creating initial session for new user {username}")
         logger.info(f"[REGISTER] Token: {token[:10]}..., Expires: {expires_at_str}")
         
+        logger.info(f"[REGISTER] Inserting session into database...")
         cursor.execute('''
             INSERT INTO user_sessions (user_id, token, ip_address, expires_at, is_active)
             VALUES (?, ?, ?, ?, 1)
@@ -247,6 +269,7 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         logger.info(f"[REGISTER] Session inserted with ID={session_id}")
         
         # Явная проверка что сессия записалась
+        logger.info(f"[REGISTER] Verifying session was written to database...")
         cursor.execute('''
             SELECT id, token, is_active, expires_at FROM user_sessions WHERE id = ?
         ''', (session_id,))
@@ -256,8 +279,10 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         else:
             logger.error(f"[REGISTER] ERROR: Session {session_id} was NOT found after INSERT!")
         
+        logger.info(f"[REGISTER] Committing transaction...")
         conn.commit()
         conn.close()
+        logger.info(f"[REGISTER] Database committed and closed")
         
         logger.info(f"[REGISTER] Initial session created and committed for {username}")
         
@@ -265,7 +290,7 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         log_activity(user_id, "USER_REGISTERED", ip_address)
         record_login_attempt(ip_address, True)
         
-        logger.info(f"New user registered: {username}")
+        logger.info(f"[REGISTER] === REGISTRATION SUCCESSFUL for {username} ===")
         return {
             'success': True, 
             'token': token, 
@@ -274,7 +299,7 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         }
         
     except Exception as e:
-        logger.error(f"Registration error for {username}: {e}")
+        logger.error(f"[REGISTER] === REGISTRATION FAILED with exception: {e} ===", exc_info=True)
         # Более детальная обработка ошибок
         error_message = str(e)
         if "password cannot be longer than 72 bytes" in error_message:
@@ -286,15 +311,22 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
 
 def authenticate_user_secure(username: str, password: str, device_id: str = "", device_name: str = "", ip_address: str = None) -> dict:
     """Безопасная аутентификация пользователя"""
+    logger.info(f"[AUTH] === STARTING AUTHENTICATION for {username} ===")
     try:
         # Проверка блокировки IP
         if is_ip_blocked(ip_address):
+            logger.warning(f"[AUTH] IP {ip_address} is blocked")
             return {'success': False, 'error': 'IP временно заблокирован из-за множественных неудачных попыток'}
         
-        conn = sqlite3.connect(db_path)
+        logger.info(f"[AUTH] Opening database connection...")
+        conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         cursor = conn.cursor()
         
         # Получение данных пользователя
+        logger.info(f"[AUTH] Fetching user {username} from database...")
         cursor.execute('''
             SELECT id, username, password_hash, salt, is_active, login_attempts, locked_until
             FROM users WHERE username = ?
@@ -302,14 +334,17 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         
         user_data = cursor.fetchone()
         if not user_data:
+            logger.warning(f"[AUTH] User not found: {username}")
             conn.close()
             record_login_attempt(ip_address, False)
             return {'success': False, 'error': 'Неверное имя пользователя или пароль'}
         
+        logger.info(f"[AUTH] User found: {username}")
         user_id, db_username, password_hash, salt, is_active, login_attempts_db, locked_until = user_data
         
         # Проверка активности аккаунта
         if not is_active:
+            logger.warning(f"[AUTH] Account is inactive: {username}")
             conn.close()
             return {'success': False, 'error': 'Аккаунт деактивирован'}
         
@@ -318,20 +353,21 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
             try:
                 locked_datetime = datetime.fromisoformat(locked_until)
                 if locked_datetime > datetime.now():
+                    logger.warning(f"[AUTH] Account is locked until {locked_datetime}: {username}")
                     conn.close()
                     return {'success': False, 'error': 'Аккаунт временно заблокирован'}
             except:
                 pass  # Игнорируем ошибки парсинга даты
         
         # Проверка пароля
-        logger.info(f"Verifying password for user {username}")
+        logger.info(f"[AUTH] Verifying password for user {username}")
         password_valid = verify_password(password, salt, password_hash)
-        logger.info(f"Password verification result for {username}: {password_valid}")
+        logger.info(f"[AUTH] Password verification result: {password_valid}")
         
         if not password_valid:
             # Увеличение счетчика неудачных попыток
             new_attempts = (login_attempts_db or 0) + 1
-            logger.warning(f"Failed login attempt #{new_attempts} for user {username}")
+            logger.warning(f"[AUTH] Failed login attempt #{new_attempts} for user {username}")
             cursor.execute('''
                 UPDATE users SET login_attempts = ?
                 WHERE id = ?
@@ -340,6 +376,7 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
             # Блокировка после 5 неудачных попыток
             if new_attempts >= 5:
                 locked_until = datetime.now() + timedelta(minutes=30)
+                logger.warning(f"[AUTH] Locking account for {username} until {locked_until}")
                 cursor.execute('''
                     UPDATE users SET locked_until = ?
                     WHERE id = ?
@@ -352,6 +389,7 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
             log_activity(user_id, "LOGIN_FAILED", ip_address)
             return {'success': False, 'error': 'Неверное имя пользователя или пароль'}
         
+        logger.info(f"[AUTH] Password is valid, creating new session...")
         # Сброс счетчика попыток при успешном входе
         cursor.execute('''
             UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = CURRENT_TIMESTAMP
@@ -359,13 +397,14 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         ''', (user_id,))
         
         # Создание новой сессии
+        logger.info(f"[AUTH] Creating new session...")
         token = generate_secure_token()
         expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
         expires_at_str = expires_at.isoformat()
         
-        logger.info(f"[AUTH] Creating new session for user {username}")
         logger.info(f"[AUTH] Token: {token[:10]}..., Expires: {expires_at_str}")
         
+        logger.info(f"[AUTH] Inserting session into database...")
         cursor.execute('''
             INSERT INTO user_sessions (user_id, token, device_id, device_name, ip_address, expires_at, is_active)
             VALUES (?, ?, ?, ?, ?, ?, 1)
@@ -375,6 +414,7 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         logger.info(f"[AUTH] Session inserted with ID={session_id}")
         
         # Явная проверка что сессия записалась
+        logger.info(f"[AUTH] Verifying session was written to database...")
         cursor.execute('''
             SELECT id, token, is_active, expires_at FROM user_sessions WHERE id = ?
         ''', (session_id,))
@@ -384,10 +424,12 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         else:
             logger.error(f"[AUTH] ERROR: Session {session_id} was NOT found after INSERT!")
         
+        logger.info(f"[AUTH] Committing transaction...")
         conn.commit()
         conn.close()
+        logger.info(f"[AUTH] Database committed and closed")
         
-        logger.info(f"[AUTH] Session created and committed successfully for {username}")
+        logger.info(f"[AUTH] === AUTHENTICATION SUCCESSFUL for {username} ===")
         
         # Логирование
         log_activity(user_id, "LOGIN_SUCCESS", ip_address, details=f"Device: {device_name}")
@@ -402,7 +444,7 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         }
         
     except Exception as e:
-        logger.error(f"Authentication error for {username}: {e}")
+        logger.error(f"[AUTH] === AUTHENTICATION FAILED with exception: {e} ===", exc_info=True)
         # Более детальная обработка ошибок
         error_message = str(e)
         if "password cannot be longer than 72 bytes" in error_message:
@@ -415,14 +457,19 @@ def get_user_by_token(token: str) -> dict:
     try:
         token = (token or '').strip()
         if not token:
-            logger.warning(f"Empty token provided")
+            logger.warning(f"[SYNC] Empty token provided")
             return None
             
-        logger.info(f"=== TOKEN VALIDATION START: {token[:10]}...{token[-10:] if len(token) > 20 else token} ===")
-        conn = sqlite3.connect(db_path)
+        logger.info(f"[SYNC] === TOKEN VALIDATION START ===")
+        logger.info(f"[SYNC] Token: {token[:10]}...{token[-10:] if len(token) > 20 else token}")
+        conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         cursor = conn.cursor()
         
-        # STEP 1: Ищем токен БЕЗ фильтров, чтобы увидеть что есть
+        # STEP 1: Ищем все активные сессии для этого токена
+        logger.info(f"[SYNC] Step 1: Looking up token in database...")
         cursor.execute('''
             SELECT s.id, s.user_id, s.token, s.is_active, s.expires_at, u.username
             FROM user_sessions s
@@ -433,56 +480,78 @@ def get_user_by_token(token: str) -> dict:
         raw_result = cursor.fetchone()
         
         if not raw_result:
-            logger.warning(f"[REJECT] Token not found in database at all")
+            logger.warning(f"[SYNC] Step 1 FAILED: Token not found in database")
+            # Дополнительная диагностика - показываем какие сессии есть вообще
+            cursor.execute('SELECT COUNT(*) FROM user_sessions')
+            total_sessions = cursor.fetchone()[0]
+            logger.warning(f"[SYNC] Diagnostic: Total sessions in DB: {total_sessions}")
             conn.close()
             return None
         
         session_id, user_id, found_token, is_active, expires_at, username = raw_result
-        logger.info(f"[FOUND] Session ID={session_id}, User={username}, is_active={is_active}, expires_at={expires_at}")
+        logger.info(f"[SYNC] Step 1 SUCCESS: Found session")
+        logger.info(f"[SYNC]   Session ID: {session_id}")
+        logger.info(f"[SYNC]   User: {username} (ID={user_id})")
+        logger.info(f"[SYNC]   is_active: {is_active} (type: {type(is_active).__name__})")
+        logger.info(f"[SYNC]   expires_at: {expires_at}")
         
         # STEP 2: Проверяем is_active (может быть NULL, 0 или 1)
+        logger.info(f"[SYNC] Step 2: Checking is_active flag...")
         if is_active == 0:
-            logger.warning(f"[REJECT] Token explicitly marked as inactive (is_active=0)")
+            logger.warning(f"[SYNC] Step 2 FAILED: Token marked as inactive (is_active=0)")
             conn.close()
             return None
         
-        logger.info(f"[PASS] is_active check passed (value={is_active})")
+        logger.info(f"[SYNC] Step 2 SUCCESS: is_active is valid (value={is_active})")
         
         # STEP 3: Проверяем срок действия
+        logger.info(f"[SYNC] Step 3: Parsing expiry datetime...")
         try:
             expires_dt = datetime.fromisoformat(expires_at)
-            logger.info(f"[PARSE] expires_at parsed successfully: {expires_dt}")
+            logger.info(f"[SYNC] Step 3 SUCCESS: Parsed expires_at = {expires_dt}")
         except Exception as parse_err:
-            logger.error(f"[ERROR] Failed to parse expires_at: {parse_err}; raw={expires_at}")
+            logger.error(f"[SYNC] Step 3 FAILED: Could not parse expires_at: {parse_err}")
+            logger.error(f"[SYNC]   Raw value: {expires_at} (type: {type(expires_at).__name__})")
             # Даем токену еще 24 часа, если не можем распарсить дату
             expires_dt = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
-            logger.info(f"[FALLBACK] Using fallback expires_dt: {expires_dt}")
+            logger.warning(f"[SYNC] Using fallback expiry: {expires_dt}")
 
         now = datetime.now()
         time_diff = (expires_dt - now).total_seconds()
-        logger.info(f"[TIME] Now={now}, Expires={expires_dt}, Diff={time_diff}s")
+        time_diff_minutes = time_diff / 60
+        
+        logger.info(f"[SYNC] Step 4: Checking token expiry...")
+        logger.info(f"[SYNC]   Current time: {now}")
+        logger.info(f"[SYNC]   Expires at:  {expires_dt}")
+        logger.info(f"[SYNC]   Time remaining: {time_diff_minutes:.1f} minutes ({time_diff:.0f} seconds)")
         
         # Разрешаем дрейф часов ±5 минут
         if expires_dt + timedelta(minutes=5) <= now:
-            logger.warning(f"[REJECT] Token expired: {expires_dt} + 5min <= {now}")
+            logger.warning(f"[SYNC] Step 4 FAILED: Token is expired")
+            logger.warning(f"[SYNC]   Expiry + 5min tolerance: {expires_dt + timedelta(minutes=5)}")
+            logger.warning(f"[SYNC]   Current time: {now}")
+            logger.warning(f"[SYNC] Marking session {session_id} as inactive in database")
             cursor.execute('UPDATE user_sessions SET is_active = 0 WHERE id = ?', (session_id,))
             conn.commit()
             conn.close()
             return None
         
-        logger.info(f"[PASS] Expiry check passed")
-        logger.info(f"=== TOKEN VALIDATION SUCCESS for user {username} ===")
+        logger.info(f"[SYNC] Step 4 SUCCESS: Token is still valid")
+        logger.info(f"[SYNC] === TOKEN VALIDATION SUCCESS for user {username} ===")
         conn.close()
         return {'user_id': user_id, 'username': username}
         
     except Exception as e:
-        logger.error(f"[ERROR] Token validation error: {e}", exc_info=True)
+        logger.error(f"[SYNC] EXCEPTION during token validation: {e}", exc_info=True)
         return None
 
 def store_clipboard_data(user_id: int, content: str, device_id: str = ""):
     """Сохранение данных буфера обмена"""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         cursor = conn.cursor()
         
         content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -509,7 +578,10 @@ def store_clipboard_data(user_id: int, content: str, device_id: str = ""):
 def get_clipboard_data(user_id: int, since_timestamp: str = None) -> dict:
     """Получение последних данных буфера обмена для пользователя"""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         cursor = conn.cursor()
         
         if since_timestamp:
@@ -651,16 +723,20 @@ class SecureHTTPHandler(BaseHTTPRequestHandler):
         token = params.get('token', [''])[0]
         since = params.get('since', [None])[0]
         
-        logger.info(f"[SYNC] Received sync request with token {token[:10]}...")
+        logger.info(f"[SYNC] ===== SYNC REQUEST START =====")
+        logger.info(f"[SYNC] Received sync request from {self.get_client_ip()}")
+        logger.info(f"[SYNC] Token: {token[:20]}..." if len(token) > 20 else f"[SYNC] Token: {token}")
+        logger.info(f"[SYNC] Since: {since}")
         
         user_data = get_user_by_token(token)
         if not user_data:
-            logger.error(f"[SYNC] Token validation failed, returning 400")
+            logger.error(f"[SYNC] ===== SYNC FAILED: Token validation returned None =====")
             self.send_error_response({'error': 'Invalid or expired token'})
             return
         
         logger.info(f"[SYNC] Token valid for user {user_data['username']}, retrieving clipboard")
         result = get_clipboard_data(user_data['user_id'], since)
+        logger.info(f"[SYNC] ===== SYNC SUCCESS: Returning clipboard data =====")
         self.send_json_response(result)
     
     def send_json_response(self, data: dict):
@@ -682,7 +758,10 @@ class SecureHTTPHandler(BaseHTTPRequestHandler):
 def cleanup_expired_sessions():
     """Очистка истёкших сессий"""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10, isolation_level='DEFERRED')
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=FULL')
+        conn.execute('PRAGMA temp_store=MEMORY')
         cursor = conn.cursor()
         
         # Деактивируем истёкшие сессии
