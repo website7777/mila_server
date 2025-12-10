@@ -260,6 +260,7 @@ def register_user_secure(username: str, password: str, email: str = "", ip_addre
         logger.info(f"[REGISTER] Token: {token[:10]}..., Expires: {expires_at_str}")
         
         logger.info(f"[REGISTER] Inserting session into database...")
+        logger.info(f"[REGISTER] About to INSERT: user_id={user_id}, token={token}, ip={ip_address}, expires_at_str={expires_at_str}")
         cursor.execute('''
             INSERT INTO user_sessions (user_id, token, ip_address, expires_at, is_active)
             VALUES (?, ?, ?, ?, 1)
@@ -405,6 +406,7 @@ def authenticate_user_secure(username: str, password: str, device_id: str = "", 
         logger.info(f"[AUTH] Token: {token[:10]}..., Expires: {expires_at_str}")
         
         logger.info(f"[AUTH] Inserting session into database...")
+        logger.info(f"[AUTH] About to INSERT: user_id={user_id}, token={token}, device_id={device_id}, expires_at_str={expires_at_str}")
         cursor.execute('''
             INSERT INTO user_sessions (user_id, token, device_id, device_name, ip_address, expires_at, is_active)
             VALUES (?, ?, ?, ?, ?, ?, 1)
@@ -501,8 +503,9 @@ def get_user_by_token(token: str) -> dict:
         logger.info(f"[SYNC] Step 1 SUCCESS: Found session")
         logger.info(f"[SYNC]   Session ID: {session_id}")
         logger.info(f"[SYNC]   User: {username} (ID={user_id})")
+        logger.info(f"[SYNC]   Token match: input={token[:20]}... vs stored={found_token[:20]}...")
         logger.info(f"[SYNC]   is_active: {is_active} (type: {type(is_active).__name__})")
-        logger.info(f"[SYNC]   expires_at: {expires_at}")
+        logger.info(f"[SYNC]   expires_at (RAW): {expires_at} (type: {type(expires_at).__name__})")
         
         # STEP 2: Проверяем is_active (может быть NULL, 0 или 1)
         logger.info(f"[SYNC] Step 2: Checking is_active flag...")
@@ -530,9 +533,11 @@ def get_user_by_token(token: str) -> dict:
         time_diff_minutes = time_diff / 60
         
         logger.info(f"[SYNC] Step 4: Checking token expiry...")
-        logger.info(f"[SYNC]   Current time: {now}")
-        logger.info(f"[SYNC]   Expires at:  {expires_dt}")
+        logger.info(f"[SYNC]   Current time: {now} (type: {type(now).__name__})")
+        logger.info(f"[SYNC]   Expires at:  {expires_dt} (type: {type(expires_dt).__name__})")
+        logger.info(f"[SYNC]   Expiry + 5min: {expires_dt + timedelta(minutes=5)}")
         logger.info(f"[SYNC]   Time remaining: {time_diff_minutes:.1f} minutes ({time_diff:.0f} seconds)")
+        logger.info(f"[SYNC]   Will FAIL if: {expires_dt + timedelta(minutes=5)} <= {now} ? {expires_dt + timedelta(minutes=5) <= now}")
         
         # Разрешаем дрейф часов ±5 минут
         if expires_dt + timedelta(minutes=5) <= now:
