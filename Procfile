@@ -1,1 +1,1 @@
-web: python secure_server_http_v3
+web: python secure_server_http.py
