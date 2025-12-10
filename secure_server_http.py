@@ -470,6 +470,7 @@ def get_user_by_token(token: str) -> dict:
         
         # STEP 1: Ищем все активные сессии для этого токена
         logger.info(f"[SYNC] Step 1: Looking up token in database...")
+        logger.info(f"[SYNC] Token length: {len(token)}, bytes: {len(token.encode('utf-8'))}")
         cursor.execute('''
             SELECT s.id, s.user_id, s.token, s.is_active, s.expires_at, u.username
             FROM user_sessions s
@@ -485,6 +486,14 @@ def get_user_by_token(token: str) -> dict:
             cursor.execute('SELECT COUNT(*) FROM user_sessions')
             total_sessions = cursor.fetchone()[0]
             logger.warning(f"[SYNC] Diagnostic: Total sessions in DB: {total_sessions}")
+            
+            # Попытаемся найти ЛЮБУЮ сессию для отладки
+            cursor.execute('SELECT id, token, is_active FROM user_sessions ORDER BY id DESC LIMIT 1')
+            last_session = cursor.fetchone()
+            if last_session:
+                logger.warning(f"[SYNC] Last session in DB: ID={last_session[0]}, token={last_session[1][:20]}..., is_active={last_session[2]}")
+                logger.warning(f"[SYNC] Comparison: looking for '{token[:20]}...' vs stored '{last_session[1][:20]}...'")
+            
             conn.close()
             return None
         
@@ -530,9 +539,8 @@ def get_user_by_token(token: str) -> dict:
             logger.warning(f"[SYNC] Step 4 FAILED: Token is expired")
             logger.warning(f"[SYNC]   Expiry + 5min tolerance: {expires_dt + timedelta(minutes=5)}")
             logger.warning(f"[SYNC]   Current time: {now}")
-            logger.warning(f"[SYNC] Marking session {session_id} as inactive in database")
-            cursor.execute('UPDATE user_sessions SET is_active = 0 WHERE id = ?', (session_id,))
-            conn.commit()
+            # DO NOT deactivate the session - just reject this request
+            # The session will be cleaned up by cleanup_expired_sessions() periodic task
             conn.close()
             return None
         
