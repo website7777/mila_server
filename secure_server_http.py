@@ -247,13 +247,17 @@ class Auth:
     @staticmethod
     def validate_token(token: str) -> dict:
         """Проверяет токен и возвращает данные пользователя"""
+        logger.info(f"validate_token called with token: {repr(token[:30] if token else token)}...")
+        
         if not token:
+            logger.warning("validate_token: token is empty or None")
             return None
         
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
             
+            logger.info(f"Connected to DB for validation, token length: {len(token)}")
             logger.debug(f"Validating token: {token[:20]}...")
             
             # Ищем активную сессию
@@ -265,12 +269,21 @@ class Auth:
             ''', (token,))
             
             session = cursor.fetchone()
+            logger.info(f"Session query returned: {session is not None}")
             
             # Диагностика: если токен не найден, проверим сессии в БД
             if not session:
                 cursor.execute('SELECT COUNT(*) as count FROM sessions')
                 session_count = cursor.fetchone()['count']
                 logger.warning(f"Token not found: {token[:20]}... (Total sessions in DB: {session_count})")
+                # Дополнительная диагностика - выводим первые токены из БД
+                cursor.execute('SELECT token FROM sessions LIMIT 1')
+                first_token = cursor.fetchone()
+                if first_token:
+                    db_token = first_token['token']
+                    logger.warning(f"First token in DB (first 30 chars): {db_token[:30]}")
+                    logger.warning(f"Received token (first 30 chars): {token[:30]}")
+                    logger.warning(f"Tokens match: {db_token == token}")
                 conn.close()
                 return None
             
