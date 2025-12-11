@@ -39,7 +39,8 @@ class Database:
         logger.debug(f"Connecting to database at: {abs_path}")
         conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA synchronous=FULL')  # FULL instead of NORMAL to force disk write
+        conn.execute('PRAGMA busy_timeout=30000')
         conn.row_factory = sqlite3.Row
         return conn
     
@@ -151,28 +152,44 @@ class Auth:
             
             # Создаем токен
             token = Auth.generate_token()
+            token_hash = hash(token)  # Для отслеживания
+            logger.info(f"Token generated, length: {len(token)}, first 20: {token[:20]}, hash: {token_hash}")
+            
             expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
-            logger.info(f"Token created, expires_at: {expires_at.isoformat()}")
+            logger.info(f"Token expires_at: {expires_at.isoformat()}")
             
             cursor.execute(
                 'INSERT INTO sessions (user_id, token, expires_at) VALUES (?, ?, ?)',
                 (user_id, token, expires_at.isoformat())
             )
-            logger.info(f"Session inserted for user_id: {user_id}, token: {token[:20]}...")
+            logger.info(f"Session inserted, lastrowid: {cursor.lastrowid}")
             
             conn.commit()
+            logger.info(f"Database commit successful")
             
-            # Проверяем, что токен действительно сохранился
-            cursor.execute('SELECT token FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1', (user_id,))
-            saved_session = cursor.fetchone()
-            if saved_session and saved_session['token'] == token:
-                logger.info(f"✓ Session verified in DB for user: {username}")
+            # Force WAL checkpoint to ensure data is written to disk
+            conn.execute('PRAGMA wal_checkpoint(RESTART)')
+            logger.debug(f"WAL checkpoint forced")
+            
+            # Проверяем, что токен действительно сохранился - новое подключение
+            verify_conn = Database.get_connection()
+            verify_cursor = verify_conn.cursor()
+            verify_cursor.execute('SELECT token, expires_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1', (user_id,))
+            saved_session = verify_cursor.fetchone()
+            
+            if saved_session:
+                saved_token = saved_session['token']
+                saved_hash = hash(saved_token)
+                logger.info(f"Token retrieved from DB, first 20: {saved_token[:20]}, hash: {saved_hash}")
+                logger.info(f"Token match: {saved_token == token} (stored == created)")
+                logger.info(f"Token length stored: {len(saved_token)}")
+                logger.info(f"Expires_at in DB: {saved_session['expires_at']}")
             else:
-                logger.error(f"✗ Session NOT found in DB after insert! user_id: {user_id}")
-            
+                logger.error(f"✗ Session NOT found in DB after insert!")
+            verify_conn.close()
             conn.close()
             
-            logger.info(f"User registered successfully: {username}")
+            logger.info(f"✓ User registered: {username}, returning token: {token[:20]}...")
             return {
                 'success': True,
                 'token': token,
@@ -250,7 +267,8 @@ class Auth:
     @staticmethod
     def validate_token(token: str) -> dict:
         """Проверяет токен и возвращает данные пользователя"""
-        logger.info(f"validate_token called with token: {repr(token[:30] if token else token)}...")
+        token_hash = hash(token) if token else None
+        logger.info(f"validate_token: token length={len(token) if token else 0}, hash={token_hash}, first 20: {token[:20] if token else 'EMPTY'}")
         
         if not token:
             logger.warning("validate_token: token is empty or None")
@@ -260,48 +278,71 @@ class Auth:
             conn = Database.get_connection()
             cursor = conn.cursor()
             
-            logger.info(f"Connected to DB for validation, token length: {len(token)}")
-            logger.debug(f"Validating token: {token[:20]}...")
+            logger.debug(f"Querying sessions table...")
             
-            # Ищем активную сессию
+            # Сначала проверим сессии вообще
+            cursor.execute('SELECT COUNT(*) as total FROM sessions')
+            total_sessions = cursor.fetchone()['total']
+            logger.debug(f"Total sessions in DB: {total_sessions}")
+            
+            # Проверяем первый токен
+            if total_sessions > 0:
+                cursor.execute('SELECT token FROM sessions LIMIT 1')
+                first = cursor.fetchone()
+                if first:
+                    first_token = first['token']
+                    first_hash = hash(first_token)
+                    logger.debug(f"First token in DB: first 20: {first_token[:20]}, hash: {first_hash}, length: {len(first_token)}")
+            
+            # Ищем активную сессию с нашим токеном
+            logger.debug(f"Searching for exact token match...")
             cursor.execute('''
-                SELECT s.user_id, s.expires_at, u.username
+                SELECT s.id, s.user_id, s.expires_at, u.username
                 FROM sessions s
                 JOIN users u ON s.user_id = u.id
                 WHERE s.token = ?
             ''', (token,))
             
             session = cursor.fetchone()
-            logger.info(f"Session query returned: {session is not None}")
+            logger.info(f"Session query result: {session is not None}")
             
-            # Диагностика: если токен не найден, проверим сессии в БД
             if not session:
-                cursor.execute('SELECT COUNT(*) as count FROM sessions')
-                session_count = cursor.fetchone()['count']
-                logger.warning(f"Token not found: {token[:20]}... (Total sessions in DB: {session_count})")
-                # Дополнительная диагностика - выводим первые токены из БД
-                cursor.execute('SELECT token FROM sessions LIMIT 1')
-                first_token = cursor.fetchone()
-                if first_token:
-                    db_token = first_token['token']
-                    logger.warning(f"First token in DB (first 30 chars): {db_token[:30]}")
-                    logger.warning(f"Received token (first 30 chars): {token[:30]}")
-                    logger.warning(f"Tokens match: {db_token == token}")
+                # Дополнительная диагностика
+                logger.warning(f"Token NOT found in DB: {token[:20]}... (hash: {token_hash})")
+                
+                # Показываем все токены из БД для сравнения
+                cursor.execute('SELECT id, token, expires_at FROM sessions ORDER BY created_at DESC LIMIT 3')
+                recent_tokens = cursor.fetchall()
+                logger.warning(f"Last 3 tokens in DB:")
+                for idx, row in enumerate(recent_tokens):
+                    t = row['token']
+                    t_hash = hash(t)
+                    logger.warning(f"  [{idx}] first 20: {t[:20]}, hash: {t_hash}, length: {len(t)}, match: {t == token}")
+                
                 conn.close()
                 return None
             
             # Проверяем срок действия
+            expires_at = session['expires_at']
+            logger.debug(f"Token expires_at: {expires_at}")
+            
             try:
-                expires_at = datetime.fromisoformat(session['expires_at'])
-                if expires_at < datetime.now():
-                    logger.warning(f"Token expired for user: {session['username']}")
+                exp_dt = datetime.fromisoformat(expires_at)
+                now = datetime.now()
+                time_remaining = (exp_dt - now).total_seconds()
+                logger.info(f"Token expiry check: expires={expires_at}, now={now.isoformat()}, remaining seconds: {time_remaining}")
+                
+                if exp_dt < now:
+                    logger.warning(f"Token EXPIRED for user: {session['username']}")
                     conn.close()
                     return None
             except Exception as te:
-                logger.error(f"Token expiry parse error: {te}, expires_at: {session['expires_at']}")
+                logger.error(f"Token expiry parse error: {te}")
+                logger.error(f"Expires_at value: {repr(expires_at)}")
             
+            logger.info(f"✓ Token VALID for user: {session['username']}, remaining: {time_remaining}s")
             conn.close()
-            logger.info(f"Token valid for user: {session['username']}")
+            
             return {
                 'user_id': session['user_id'],
                 'username': session['username']
