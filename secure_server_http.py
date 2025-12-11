@@ -16,7 +16,7 @@ from urllib.parse import urlparse, parse_qs
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -34,6 +34,9 @@ class Database:
     @staticmethod
     def get_connection():
         """Создает подключение к БД с правильными настройками"""
+        import os
+        abs_path = os.path.abspath(DB_PATH)
+        logger.debug(f"Connecting to database at: {abs_path}")
         conn = sqlite3.connect(DB_PATH, timeout=30)
         conn.execute('PRAGMA journal_mode=WAL')
         conn.execute('PRAGMA synchronous=NORMAL')
