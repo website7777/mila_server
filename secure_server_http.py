@@ -43,49 +43,57 @@ class Database:
     @staticmethod
     def init():
         """Инициализация базы данных"""
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        
-        # Таблица пользователей
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Таблица сессий
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                token TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-        
-        # Таблица буфера обмена
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS clipboard (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-        
-        # Создаем индексы для быстрого поиска
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_clipboard_user ON clipboard(user_id, created_at DESC)')
-        
-        conn.commit()
-        conn.close()
-        logger.info("Database initialized successfully")
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            
+            logger.info(f"Initializing database at: {DB_PATH}")
+            
+            # Таблица пользователей
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Таблица сессий
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    token TEXT UNIQUE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            ''')
+            
+            # Таблица буфера обмена
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS clipboard (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            ''')
+            
+            # Создаем индексы для быстрого поиска
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_clipboard_user ON clipboard(user_id, created_at DESC)')
+            
+            conn.commit()
+            conn.close()
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Database initialization error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
 
 class Auth:
     """Аутентификация и авторизация"""
@@ -452,8 +460,21 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def main():
     """Запуск сервера"""
-    # Инициализация базы данных
-    Database.init()
+    # Инициализация базы данных с повторными попытками
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            Database.init()
+            logger.info("Database initialization successful")
+            break
+        except Exception as e:
+            logger.error(f"Database init attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(1)
+            else:
+                logger.error("Failed to initialize database after all retries")
+                raise
     
     # Создание и запуск HTTP сервера
     server = HTTPServer((HOST, PORT), RequestHandler)
