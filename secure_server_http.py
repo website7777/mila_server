@@ -190,33 +190,44 @@ class Auth:
         
         try:
             conn = Database.get_connection()
+            logger.info(f"Connected to database for login")
             cursor = conn.cursor()
             
             # Получаем пользователя
+            logger.info(f"Querying user: {username}")
             cursor.execute(
                 'SELECT id, username, password_hash FROM users WHERE username = ?',
                 (username,)
             )
             user = cursor.fetchone()
+            logger.info(f"User query result: {user is not None}")
             
             if not user:
+                logger.warning(f"User not found: {username}")
                 conn.close()
                 return {'success': False, 'error': 'Invalid username or password'}
             
+            logger.info(f"User found, verifying password")
             # Проверяем пароль
             if not Auth.verify_password(password, user['password_hash']):
+                logger.warning(f"Password verification failed for: {username}")
                 conn.close()
                 return {'success': False, 'error': 'Invalid username or password'}
             
+            logger.info(f"Password verified, creating token")
             # Создаем новую сессию
             token = Auth.generate_token()
             expires_at = datetime.now() + timedelta(hours=TOKEN_EXPIRY_HOURS)
+            logger.info(f"Token generated: {token[:20]}..., expires_at: {expires_at.isoformat()}")
+            
             cursor.execute(
                 'INSERT INTO sessions (user_id, token, expires_at) VALUES (?, ?, ?)',
                 (user['id'], token, expires_at.isoformat())
             )
+            logger.info(f"Session insert executed")
             
             conn.commit()
+            logger.info(f"Session committed to database")
             conn.close()
             
             logger.info(f"User logged in successfully: {username}")
@@ -229,6 +240,8 @@ class Auth:
             
         except Exception as e:
             logger.error(f"Login error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {'success': False, 'error': str(e)}
     
     @staticmethod
@@ -423,9 +436,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         
+        logger.info(f"POST {self.path} - Content-Length: {content_length}")
+        
         try:
             data = json.loads(post_data.decode('utf-8'))
-        except:
+            logger.info(f"Received data: {data}")
+        except Exception as e:
+            logger.error(f"JSON parse error: {e}, raw data: {post_data[:200]}")
             self.send_json({'error': 'Invalid JSON'}, 400)
             return
         
@@ -456,6 +473,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({'success': success})
             
         else:
+            logger.warning(f"Unknown endpoint: {self.path}")
             self.send_json({'error': 'Endpoint not found'}, 404)
 
 def main():
