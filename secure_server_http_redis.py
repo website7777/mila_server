@@ -143,32 +143,40 @@ class Auth:
 
 class ClipboardManager:
     @staticmethod
-    def push(user_id: int, content: str) -> bool:
+    def push(user_id: int, content: str, device_id: str = '') -> bool:
         r = RedisDB.get_connection()
         key = f'clipboard:{user_id}'
-        r.lpush(key, content)
+        # Сохраняем контент вместе с device_id
+        item = json.dumps({'content': content, 'device_id': device_id, 'timestamp': datetime.now().isoformat()})
+        r.lpush(key, item)
         r.ltrim(key, 0, 9)  # Оставляем последние 10 записей
         return True
 
     @staticmethod
-    def get(user_id: int, since: str = None) -> dict:
+    def get(user_id: int, since: str = None, requesting_device_id: str = '') -> dict:
         r = RedisDB.get_connection()
         key = f'clipboard:{user_id}'
-        items = r.lrange(key, 0, 0)
-        if items:
-            return {
-                'success': True,
-                'content': items[0],
-                'timestamp': None,
-                'device_id': '',
-                'id': 1
-            }
-        else:
-            return {
-                'success': True,
-                'content': None,
-                'timestamp': None
-            }
+        items = r.lrange(key, 0, 9)  # Получаем последние 10 записей
+        for item_str in items:
+            try:
+                item = json.loads(item_str)
+                # Возвращаем только данные от ДРУГИХ устройств
+                if item.get('device_id', '') != requesting_device_id:
+                    return {
+                        'success': True,
+                        'content': item.get('content'),
+                        'timestamp': item.get('timestamp'),
+                        'device_id': item.get('device_id', ''),
+                        'id': 1
+                    }
+            except:
+                # Старый формат (просто строка) - игнорируем device_id
+                pass
+        return {
+            'success': True,
+            'content': None,
+            'timestamp': None
+        }
 
 class RequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -196,11 +204,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif parsed.path == '/sync':
             params = parse_qs(parsed.query)
             token = params.get('token', [''])[0]
+            device_id = params.get('device_id', [''])[0]
             user = Auth.validate_token(token)
             if not user:
                 self.send_json({'error': 'Invalid or expired token'}, 400)
                 return
-            result = ClipboardManager.get(user['user_id'])
+            result = ClipboardManager.get(user['user_id'], requesting_device_id=device_id)
             self.send_json(result)
         else:
             self.send_json({'error': 'Not found'}, 404)
@@ -230,11 +239,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif self.path == '/push':
             token = data.get('token', '')
             content = data.get('content', '')
+            device_id = data.get('device_id', '')
             user = Auth.validate_token(token)
             if not user:
                 self.send_json({'error': 'Invalid or expired token'}, 400)
                 return
-            success = ClipboardManager.push(user['user_id'], content)
+            success = ClipboardManager.push(user['user_id'], content, device_id)
             self.send_json({'success': success})
         else:
             logger.warning(f"Unknown endpoint: {self.path}")
