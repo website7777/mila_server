@@ -179,6 +179,8 @@ class ClipboardManager:
                 item_id = item.get('id', 0)
                 item_device_id = item.get('device_id', '')
                 
+                logger.info(f"  Check item #{item_id} from {item_device_id[:8] if item_device_id else 'none'}: other_device={item_device_id != requesting_device_id}, newer={item_id > last_id}")
+                
                 # Возвращаем только данные от ДРУГИХ устройств И только новые (id > last_id)
                 if item_device_id != requesting_device_id and item_id > last_id:
                     # Обновляем last_id на сервере для этого устройства
@@ -196,12 +198,30 @@ class ClipboardManager:
                 logger.error(f"Error parsing clipboard item: {e}")
                 pass
         
+        logger.info(f"  → No new items")
         return {
             'success': True,
             'content': None,
             'timestamp': None,
             'id': last_id
         }
+    
+    @staticmethod
+    def reset_last_id(user_id: int, device_id: str = '') -> dict:
+        """Сбросить last_id для устройства"""
+        r = RedisDB.get_connection()
+        if device_id:
+            # Сброс для конкретного устройства
+            last_id_key = f'last_id:{user_id}:{device_id}'
+            r.delete(last_id_key)
+            logger.info(f"Reset last_id for device {device_id[:8]}")
+        else:
+            # Сброс для всех устройств пользователя
+            keys = r.keys(f'last_id:{user_id}:*')
+            for k in keys:
+                r.delete(k)
+            logger.info(f"Reset all last_ids for user {user_id}")
+        return {'success': True}
 
 class RequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -279,6 +299,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 logger.info(f"Received text from device {device_id[:8] if device_id else 'unknown'}: {content[:50] if content else 'empty'}...")
             
             result = ClipboardManager.push(user['user_id'], content, device_id, content_type)
+            self.send_json(result)
+        elif self.path == '/reset':
+            # Сброс last_id для отладки
+            token = data.get('token', '')
+            device_id = data.get('device_id', '')
+            user = Auth.validate_token(token)
+            if not user:
+                self.send_json({'error': 'Invalid or expired token'}, 400)
+                return
+            result = ClipboardManager.reset_last_id(user['user_id'], device_id)
             self.send_json(result)
         else:
             logger.warning(f"Unknown endpoint: {self.path}")
