@@ -162,10 +162,17 @@ class ClipboardManager:
         return {'success': True, 'id': item_id}
 
     @staticmethod
-    def get(user_id: int, requesting_device_id: str = '', last_id: int = 0) -> dict:
+    def get(user_id: int, requesting_device_id: str = '') -> dict:
         r = RedisDB.get_connection()
         key = f'clipboard:{user_id}'
+        
+        # Получаем last_id для этого устройства с сервера
+        last_id_key = f'last_id:{user_id}:{requesting_device_id}'
+        last_id = int(r.get(last_id_key) or 0)
+        
         items = r.lrange(key, 0, 9)  # Получаем последние 10 записей
+        logger.info(f"SYNC: device={requesting_device_id[:8] if requesting_device_id else 'none'}, server_last_id={last_id}, items={len(items)}")
+        
         for item_str in items:
             try:
                 item = json.loads(item_str)
@@ -174,6 +181,9 @@ class ClipboardManager:
                 
                 # Возвращаем только данные от ДРУГИХ устройств И только новые (id > last_id)
                 if item_device_id != requesting_device_id and item_id > last_id:
+                    # Обновляем last_id на сервере для этого устройства
+                    r.set(last_id_key, item_id)
+                    logger.info(f"  → Returning item #{item_id}, updated last_id to {item_id}")
                     return {
                         'success': True,
                         'content': item.get('content'),
@@ -185,11 +195,12 @@ class ClipboardManager:
             except Exception as e:
                 logger.error(f"Error parsing clipboard item: {e}")
                 pass
+        
         return {
             'success': True,
             'content': None,
             'timestamp': None,
-            'id': 0
+            'id': last_id
         }
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -219,12 +230,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             token = params.get('token', [''])[0]
             device_id = params.get('device_id', [''])[0]
-            last_id = int(params.get('last_id', ['0'])[0])
+            # last_id теперь хранится на сервере, параметр клиента игнорируется
             user = Auth.validate_token(token)
             if not user:
                 self.send_json({'error': 'Invalid or expired token'}, 400)
                 return
-            result = ClipboardManager.get(user['user_id'], requesting_device_id=device_id, last_id=last_id)
+            result = ClipboardManager.get(user['user_id'], requesting_device_id=device_id)
             self.send_json(result)
         else:
             self.send_json({'error': 'Not found'}, 404)
