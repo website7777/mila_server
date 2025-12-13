@@ -143,39 +143,53 @@ class Auth:
 
 class ClipboardManager:
     @staticmethod
-    def push(user_id: int, content: str, device_id: str = '') -> bool:
+    def push(user_id: int, content: str, device_id: str = '', content_type: str = 'text') -> dict:
         r = RedisDB.get_connection()
         key = f'clipboard:{user_id}'
-        # Сохраняем контент вместе с device_id
-        item = json.dumps({'content': content, 'device_id': device_id, 'timestamp': datetime.now().isoformat()})
+        timestamp = datetime.now().isoformat()
+        item_id = r.incr(f'clipboard_id:{user_id}')
+        # Сохраняем контент вместе с device_id, type и уникальным ID
+        item = json.dumps({
+            'id': item_id,
+            'content': content,
+            'device_id': device_id,
+            'type': content_type,  # 'text' или 'image'
+            'timestamp': timestamp
+        })
         r.lpush(key, item)
         r.ltrim(key, 0, 9)  # Оставляем последние 10 записей
-        return True
+        logger.info(f"Pushed {content_type} item #{item_id} from device {device_id[:8] if device_id else 'unknown'}...")
+        return {'success': True, 'id': item_id}
 
     @staticmethod
-    def get(user_id: int, since: str = None, requesting_device_id: str = '') -> dict:
+    def get(user_id: int, requesting_device_id: str = '', last_id: int = 0) -> dict:
         r = RedisDB.get_connection()
         key = f'clipboard:{user_id}'
         items = r.lrange(key, 0, 9)  # Получаем последние 10 записей
         for item_str in items:
             try:
                 item = json.loads(item_str)
-                # Возвращаем только данные от ДРУГИХ устройств
-                if item.get('device_id', '') != requesting_device_id:
+                item_id = item.get('id', 0)
+                item_device_id = item.get('device_id', '')
+                
+                # Возвращаем только данные от ДРУГИХ устройств И только новые (id > last_id)
+                if item_device_id != requesting_device_id and item_id > last_id:
                     return {
                         'success': True,
                         'content': item.get('content'),
+                        'type': item.get('type', 'text'),
                         'timestamp': item.get('timestamp'),
-                        'device_id': item.get('device_id', ''),
-                        'id': 1
+                        'device_id': item_device_id,
+                        'id': item_id
                     }
-            except:
-                # Старый формат (просто строка) - игнорируем device_id
+            except Exception as e:
+                logger.error(f"Error parsing clipboard item: {e}")
                 pass
         return {
             'success': True,
             'content': None,
-            'timestamp': None
+            'timestamp': None,
+            'id': 0
         }
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -205,11 +219,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             token = params.get('token', [''])[0]
             device_id = params.get('device_id', [''])[0]
+            last_id = int(params.get('last_id', ['0'])[0])
             user = Auth.validate_token(token)
             if not user:
                 self.send_json({'error': 'Invalid or expired token'}, 400)
                 return
-            result = ClipboardManager.get(user['user_id'], requesting_device_id=device_id)
+            result = ClipboardManager.get(user['user_id'], requesting_device_id=device_id, last_id=last_id)
             self.send_json(result)
         else:
             self.send_json({'error': 'Not found'}, 404)
@@ -240,12 +255,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             token = data.get('token', '')
             content = data.get('content', '')
             device_id = data.get('device_id', '')
+            content_type = data.get('type', 'text')  # 'text' или 'image'
             user = Auth.validate_token(token)
             if not user:
                 self.send_json({'error': 'Invalid or expired token'}, 400)
                 return
-            success = ClipboardManager.push(user['user_id'], content, device_id)
-            self.send_json({'success': success})
+            
+            # Логируем тип контента
+            if content_type == 'image':
+                logger.info(f"Received image from device {device_id[:8] if device_id else 'unknown'}, base64 length: {len(content)}")
+            else:
+                logger.info(f"Received text from device {device_id[:8] if device_id else 'unknown'}: {content[:50] if content else 'empty'}...")
+            
+            result = ClipboardManager.push(user['user_id'], content, device_id, content_type)
+            self.send_json(result)
         else:
             logger.warning(f"Unknown endpoint: {self.path}")
             self.send_json({'error': 'Endpoint not found'}, 404)
