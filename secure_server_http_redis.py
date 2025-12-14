@@ -387,6 +387,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.send_header('Access-Control-Max-Age', '86400')
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
@@ -395,20 +398,24 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.send_header('Access-Control-Max-Age', '86400')
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        # Нормализуем путь (убираем двойные слеши)
+        path = parsed.path.replace('//', '/')
         
-        if parsed.path == '/':
+        if path == '/':
             self.send_json({
                 'status': 'ok',
                 'service': 'pc-control-sync',
                 'version': '4.0-redis'
             })
             
-        elif parsed.path == '/sync':
+        elif path == '/sync':
             # Синхронизация буфера обмена
             token = params.get('token', [''])[0]
             device_id = params.get('device_id', [''])[0]
@@ -419,7 +426,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = ClipboardManager.get(user['user_id'], requesting_device_id=device_id)
             self.send_json(result)
             
-        elif parsed.path == '/pc/list':
+        elif path == '/pc/list':
             # Список ПК пользователя
             token = params.get('token', [''])[0]
             user = Auth.validate_token(token)
@@ -429,7 +436,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = PCControlManager.get_pcs(user['user_id'])
             self.send_json(result)
             
-        elif parsed.path == '/pc/commands':
+        elif path == '/pc/commands':
             # ПК запрашивает команды
             token = params.get('token', [''])[0]
             pc_id = params.get('pc_id', [''])[0]
@@ -442,7 +449,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = PCControlManager.get_commands(user['user_id'], pc_id)
             self.send_json(result)
             
-        elif parsed.path == '/pc/result':
+        elif path == '/pc/result':
             # Браузер/телефон запрашивает результат команды
             token = params.get('token', [''])[0]
             pc_id = params.get('pc_id', [''])[0]
@@ -454,7 +461,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = PCControlManager.get_result(user['user_id'], pc_id, command_id)
             self.send_json(result)
             
-        elif parsed.path == '/pc/screen':
+        elif path == '/pc/screen':
             # Браузер/телефон запрашивает скриншот экрана
             token = params.get('token', [''])[0]
             pc_id = params.get('pc_id', [''])[0]
@@ -471,7 +478,10 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
-        logger.info(f"POST {self.path} - Content-Length: {content_length}")
+        
+        # Нормализуем путь
+        path = self.path.replace('//', '/')
+        logger.info(f"POST {path} - Content-Length: {content_length}")
         
         try:
             data = json.loads(post_data.decode('utf-8')) if content_length > 0 else {}
@@ -481,14 +491,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         # === Авторизация ===
-        if self.path == '/register':
+        if path == '/register':
             result = Auth.register(
                 data.get('username', ''),
                 data.get('password', '')
             )
             self.send_json(result, 200 if result['success'] else 400)
             
-        elif self.path == '/auth':
+        elif path == '/auth':
             result = Auth.login(
                 data.get('username', ''),
                 data.get('password', '')
@@ -496,7 +506,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json(result, 200 if result['success'] else 400)
             
         # === Буфер обмена ===
-        elif self.path == '/push':
+        elif path == '/push':
             token = data.get('token', '')
             content = data.get('content', '')
             device_id = data.get('device_id', '')
@@ -509,7 +519,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json(result)
             
         # === PC Control ===
-        elif self.path == '/pc/register':
+        elif path == '/pc/register':
             # Регистрация ПК
             token = data.get('token', '')
             pc_id = data.get('pc_id', '')
@@ -521,7 +531,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = PCControlManager.register_pc(user['user_id'], pc_id, pc_name)
             self.send_json(result)
             
-        elif self.path == '/pc/heartbeat':
+        elif path == '/pc/heartbeat':
             # Heartbeat от ПК
             token = data.get('token', '')
             pc_id = data.get('pc_id', '')
@@ -532,7 +542,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = PCControlManager.heartbeat(user['user_id'], pc_id)
             self.send_json(result)
             
-        elif self.path == '/pc/command':
+        elif path == '/pc/command':
             # Отправка команды на ПК (от телефона/браузера)
             token = data.get('token', '')
             pc_id = data.get('pc_id', '')
@@ -545,7 +555,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = PCControlManager.send_command(user['user_id'], pc_id, command_type, command_data)
             self.send_json(result)
             
-        elif self.path == '/pc/result':
+        elif path == '/pc/result':
             # ПК отправляет результат команды
             token = data.get('token', '')
             pc_id = data.get('pc_id', '')
@@ -558,7 +568,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = PCControlManager.send_result(user['user_id'], pc_id, command_id, result_data)
             self.send_json(result)
             
-        elif self.path == '/pc/screen':
+        elif path == '/pc/screen':
             # ПК отправляет скриншот
             token = data.get('token', '')
             pc_id = data.get('pc_id', '')
@@ -573,7 +583,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json(result)
             
         else:
-            logger.warning(f"Unknown endpoint: {self.path}")
+            logger.warning(f"Unknown endpoint: {path}")
             self.send_json({'error': 'Endpoint not found'}, 404)
 
 
